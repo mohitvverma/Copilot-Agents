@@ -1,0 +1,208 @@
+# Copilot prompt — Reconcile and build the Context Management Agent
+
+Paste everything below this line into GitHub Copilot Chat (agent mode), in the
+DEMO01 workspace. This combines every prior decision from this design effort, but
+adds a mandatory checkpoint (Phase A) before anything gets created, because the real
+repo structure doesn't match the original design doc in several places.
+
+---
+
+## PHASE A — Read everything real, propose a mapping, then STOP
+
+Do not create any file in Phase A. Read-only.
+
+### Read these, in full:
+
+1. `C:\Users\v579356\Downloads\IDP-Context Manager - Design-240626-054443.pdf` —
+   the Confluence design doc (text + visuals).
+2. `C:\Users\v579356\Downloads\download.png` — the architecture diagram.
+3. `.adh/projects.json`
+4. `.adh/custodians/core_neu.yml`
+5. `.adh/custodians/core_ops.yml`
+6. `.adh/README.md`
+7. `.github/agents/adh-master-v2.agent.md`
+8. `.github/agents/adh-master.agent.md`
+9. `.github/agents/coding.specialist.agent.md`,
+   `.github/agents/design.specialist.agent.md`,
+   `.github/agents/requirement-analysis.specialist.agent.md` — read these for
+   naming and frontmatter conventions, since whatever you build should match the
+   existing pattern, not invent a new one.
+9a. **`.github/skills/` and `.github/prompts/`** — both folders already exist in this
+    repo (visible in the explorer) but I haven't seen their contents. List what's
+    inside each. If any existing skill already follows a naming/frontmatter
+    convention, the new `context.py` Skill should match it rather than inventing one.
+10. `deliverables/core_ops/test-pipeline/design.md`, `implementation-plan.md`,
+    `manifest.md`, `requirements.md` — real existing deliverable content.
+11. `.github/copilot-instructions.md`
+12. Anything in `.specify/` that explains what the `speckit.*` agents do and how they
+    relate (or don't) to the master/specialist agents.
+
+### Then answer these specifically, in writing, before doing anything else:
+
+1. **Does `.adh/` replace the Confluence doc's `.adh-tracker/` entirely, or does
+   `.adh-tracker/` still belong somewhere — e.g. nested under a specific project
+   folder under `deliverables/<custodian>/<project>/`?** Don't guess — tell me what
+   `projects.json` and the two custodian YAMLs actually contain and what role they
+   play, then propose where session state should actually live.
+2. **What naming convention should the new agent follow?** The existing specialists
+   are `<role>.specialist.agent.md`. Propose the actual filename (e.g.
+   `context-management.specialist.agent.md`) based on the real pattern, not the
+   Confluence doc's `context-keeper.agent.md`.
+3. **Does `adh-master-v2.agent.md` already expect a context-management agent to
+   exist?** Quote anything in it that references delegating to, calling, or
+   coordinating with a context/state-tracking agent. If it has a `handoffs:` block or
+   similar, tell me exactly what it says — this directly answers the open question
+   from earlier about whether agents can call each other.
+4. **Is `adh-master.agent.md` (V1) still active, or superseded by V2?** If superseded,
+   the new agent should align with V2's conventions, not V1's.
+5. **Do the Spec Kit (`speckit.*`) agents need to know about this new agent, or are
+   they unrelated workflows?** Look at what `speckit.agent-context.update.agent.md`
+   does specifically — its name suggests it might already touch context/state, which
+   would directly overlap with what we're about to build. Flag this explicitly if so.
+6. **Can the real `deliverables/core_ops/test-pipeline/*.md` files be used directly**
+   as the content-layer files for testing the lookup tiers, instead of creating dummy
+   files? Confirm they contain something usable (e.g. a schema/key decision) for that
+   purpose.
+
+**Stop here and show me your findings and proposed mapping. Wait for me to confirm
+before starting Phase B.**
+
+---
+
+## PHASE B — Build (only after I confirm Phase A's mapping)
+
+Everything below assumes Phase A's findings are now locked in. Substitute real paths
+from Phase A wherever this says `.adh-tracker/` or `context-keeper.agent.md` — those
+were placeholders from the original design doc, not confirmed real paths.
+
+### Two components, packaged differently
+
+| Component | What it is | Mechanism |
+|---|---|---|
+| `context.py` reducer CLI | Reads/writes the state file | A real Copilot **Agent Skill** — `SKILL.md` + `context.py`, at `.github/skills/tracker-checkpoint/` |
+| Context management agent | The broker | A Copilot **custom Agent**, named per Phase A's answer to question 2, at `.github/agents/` |
+
+Flag in the final report anywhere this deviates from the Confluence doc: read/write
+capability on the broker (Confluence's §5.6 says read-only), the two new tracking
+files below, and any path that differs from what Phase A confirmed.
+
+### Frontmatter — mirror what already works, don't invent or guess
+
+The existing specialist agent files you read in Phase A already load correctly in
+this environment — they're proof of a working format. Copy their exact frontmatter
+field names and value formats (`name`, `description`, `tools`, `model`, and anything
+else they use) into the new agent file. Do not introduce a field name or value format
+that isn't demonstrated in at least one of those existing files, unless the new agent
+genuinely needs a capability none of them have (e.g. a write tool none of the
+read-only specialists use) — and if so, say explicitly which field is new and why,
+rather than quietly adding it.
+
+Same approach for the `SKILL.md` frontmatter if Phase A found an existing skill to
+mirror; if `.github/skills/` was empty, fall back to general Copilot Skill
+documentation and flag that you had nothing real to mirror.
+
+### Lookup order — five tiers, cheapest first, stop at first hit
+
+1. **State lookup** — against the real state file confirmed in Phase A. ~50 tokens.
+2. **Fixed file-mapping table** (identify only, don't read yet):
+
+   | Question type | File | Search for |
+   |---|---|---|
+   | `source_*` | requirements output | "Source" |
+   | design/flow | HLD output | "Design", "Flow", "Architecture" |
+   | schema/key | LLD output | "Schema", "Key", "Decision" |
+   | config/job | bronze code output | "Config", "Job", "Ingestion" |
+   | notebook | silver/gold code output | "Notebook", "Logic", "Transformation" |
+
+3. **Dynamic index lookup** — only if Tier 2 has no match or its file didn't contain
+   the answer.
+4. **Targeted file read** — whichever file Tier 2 or 3 identified. Use the real
+   `deliverables/core_ops/test-pipeline/*.md` files confirmed usable in Phase A.
+5. **History lookup** — only for "what was decided earlier" questions, bypasses
+   Tiers 1–4.
+
+`NOT_FOUND` if nothing matches anywhere. Never guess.
+
+### `context.py` commands — verbatim, do not improvise
+
+Reads: `get <namespace> <key>`, `get-shared <key>` (both exit 1 with `NOT_FOUND:
+<key>` if absent/null), `verify` (`N set, M null. Status: PASS/WARN/FAIL`).
+Writes: `set <namespace> <key> <value>`, `set-shared <key> <value>` (merges, never
+clears siblings). Both update `meta.last_updated`.
+Lifecycle: `init --run-id <id> --custodian <c> --dataset <d> --env <e>` (fails if
+state file already exists), `reset-phase <namespace>` (nulls every key in that
+namespace — inferred behavior, only mentioned once in the source doc, document as
+inferred).
+Validation: `meta.custodian`/`dataset`/`env` required before writes; values must be
+strings, arrays, or objects, no mixed types; document your decision on whether
+`required_phases` accepts a string-encoded array.
+Exit codes: 0 success, 1 error, errors to stderr.
+Specialist convention (§8): `context.py set <ns> <key> <value>; echo $?`
+
+Use the full namespace schema from the Confluence doc (10 phases: requirements, hld,
+lld, code_bronze, code_silver, code_gold, sql_views, test, review, deploy) unless
+Phase A's reading of the real custodian YAMLs shows a different actual schema in use
+— if so, use the real one and flag the difference.
+
+### New tracking files
+
+- A dynamic index (file → one-line content description), maintained by the agent.
+- An append-only history log (timestamp, namespace, key, value), maintained by the
+  agent. Neither is written by `context.py` itself.
+
+### Write responsibilities and hard rules
+
+Agent maintains the index and history log only — never writes the main state file
+(that stays owned by specialist agents). Never invokes specialist agents directly.
+Never guesses — always cites a source. Never reads/writes outside the confirmed
+project scope from Phase A.
+
+### Verify the agent is actually usable — this is the point of the whole exercise
+
+Creating the file is not the finish line. After creating it:
+
+1. Confirm the agent appears in VS Code's agent/chat-mode picker — actually check,
+   don't assume it does because the file exists.
+2. Do one real smoke-test: switch to the new agent and ask it a simple question that
+   should hit Tier 1 (something already in the state file). Confirm it actually
+   responds in the expected `VALUE: ... / SOURCE: ...` format.
+3. If it doesn't appear in the picker, or doesn't respond correctly, **say so
+   explicitly in your report** — do not report success based on the file existing
+   if you haven't confirmed it actually works when selected.
+4. Note in the report whether invoking it currently requires me to manually select it
+   from the picker each time (most likely, per the architectural-risk finding from
+   Phase A), versus being automatically triggered by the Master agent — be honest
+   about which one is actually true right now.
+
+### Demo script
+
+A single runnable script at the workspace root demonstrating all 5 tiers with labeled
+output, ending with a real (not invented) token-cost comparison based on what it just
+ran. End your build by telling me the exact command to run it.
+
+### Edge-case tests (write real tests, run them, capture real output)
+
+Tier round-trips for all 5 tiers; fixed-table-miss fallback to index; scope-boundary
+enforcement; `init` non-idempotency; type validation (general and `required_phases`
+specifically); `reset-phase` correctness; `NOT_FOUND` path; corrupted state file;
+commands run before `init`; null/empty/missing distinction; special characters and
+Unicode in values; missing index/history file on first use; null file-path in the
+fixed table; large values. Document concurrent-write safety as a known limitation,
+not a fake-tested pass.
+
+### Output — two documents
+
+1. **Technical implementation report** — what was built, real paths used, full test
+   results, the picker/smoke-test verification outcome, and a deviations section
+   (read/write capability, new files, naming convention chosen, the real finding from
+   Phase A question 3 on whether automatic agent-to-agent invocation actually works
+   here, and anything else Phase A surfaced that differs from the Confluence doc).
+2. **Layered stakeholder summary** — plain-language problem/solution first, then
+   technical detail, then the exact demo command and what it will show, then a
+   plain-language version of the deviations list.
+
+## If anything is unclear or conflicts, in either phase
+
+Stop and ask me. Do not assume a resolution to a file conflict, an ambiguous
+location, a missing tool, an unverified frontmatter field, or any test that can't be
+completed as specified.
