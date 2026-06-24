@@ -1,0 +1,109 @@
+# Copilot prompt — Independently evaluate the completed Context Manager build
+
+Paste everything below this line into GitHub Copilot Chat (agent mode), in the same
+workspace where the build was completed.
+
+---
+
+## Purpose
+
+The Context Manager (Skill + Agent + demo script + test suite + two reports) has
+already been built. This prompt is **not** a rebuild — it's an independent evaluation.
+Do not trust `IMPLEMENTATION-REPORT.md`'s own claims at face value. Re-verify
+everything yourself, by actually re-running things, not by re-reading what it already
+says about itself.
+
+## Step 1 — Confirm what actually exists
+
+List every file the original prompt asked for and confirm, file by file, whether it
+exists at the expected path:
+- `.adh-tracker/session-context.json`, `session-index.json`, `session-history.log`,
+  `.gitignore`, and the three dummy phase files
+- `.github/skills/tracker-checkpoint/SKILL.md`, `context.py`, `tests/test_context.py`
+- `.github/agents/context-keeper.agent.md`
+- `run_context_manager_demo.py`
+- `.adh-tracker/IMPLEMENTATION-REPORT.md`, `STAKEHOLDER-SUMMARY.md`
+
+If anything is missing, renamed, or in a different location than specified, say so —
+don't assume it's "close enough."
+
+## Step 2 — Re-run everything for real, capture fresh output
+
+1. Run `python run_context_manager_demo.py` (or whatever the actual confirmed command
+   is) right now, and capture the real output.
+2. Run the full test suite in `tests/test_context.py` right now, and capture the real
+   pass/fail results for every one of the 21 tests from the original prompt.
+3. **Compare this fresh output against what `IMPLEMENTATION-REPORT.md` claims.** Flag
+   any mismatch — a test the report claims passed but actually fails now, output that
+   looks different from what's documented, anything that's drifted.
+
+## Step 3 — Line-by-line spec compliance audit
+
+Go through the original build prompt's requirements one at a time and check the actual
+code, not the report, for each:
+
+- **Command spec**: open `context.py` and confirm `get`, `get-shared`, `verify`, `set`,
+  `set-shared`, `init`, `reset-phase` exist with the exact behavior specified (exit
+  codes, `NOT_FOUND` message format, `init` failing on existing file, `set-shared`
+  merging not clearing siblings).
+- **Schema**: confirm the actual JSON template `init` produces matches the full schema
+  from the build prompt exactly — every namespace, every key, no extras, nothing
+  missing.
+- **Five-tier lookup**: open `context-keeper.agent.md` and confirm the lookup order is
+  implemented as state → fixed table → index → file read → history, in that order, not
+  reordered or collapsed.
+- **Write restriction**: confirm the agent's instructions (and, if you can verify
+  behaviorally, its actual behavior) only ever write `session-index.json` and
+  `session-history.log`, and never `session-context.json`.
+- **Scope boundary**: confirm there's an actual enforced check against reading/writing
+  outside `.adh-tracker/`, not just a written instruction with no enforcement.
+- **Hard rules**: confirm all four hard rules from the build prompt are present
+  verbatim in the agent file, not paraphrased into something weaker.
+
+## Step 4 — Check the flagged unresolved items were actually resolved, not skipped
+
+The build prompt left several things for Copilot to check live and report on. Confirm
+each one actually got a real answer, not a placeholder or silence:
+
+1. The write-tool ID — what's actually in the `tools:` frontmatter now? Is it a real,
+   verified tool ID, or still a guess?
+2. The `model:` field — what format is actually there? Confirmed against the live
+   model picker, or assumed?
+3. The agent-invocation mechanism risk (Agent vs. programmatic call) — did the report
+   give a real finding (yes it works via X, or no it doesn't and here's why), or did it
+   go unaddressed?
+4. The `required_phases` type-handling decision — is there an actual documented choice
+   and matching implementation, or is this still ambiguous in the code?
+5. The workspace location (real repo vs. dedicated folder) — confirm which was
+   actually used, and whether that matches what was intended.
+
+For each of these five, if you find it was *not* actually resolved (just mentioned and
+left open, or silently assumed), say so explicitly — don't let a "flagged" item quietly
+become a "resolved" item just because time passed.
+
+## Step 5 — Check the documentation itself for accuracy
+
+Read `STAKEHOLDER-SUMMARY.md` end to end and confirm every claim in it is actually
+true of the current state of the code — especially the "how to see it work yourself"
+section's command and the described step-by-step output. If the demo script's actual
+output (from Step 2) doesn't match what the stakeholder doc says it will show, flag
+that specifically — this is the section most likely to drift out of sync and least
+acceptable to be wrong, since it's the part shown to people outside the team.
+
+## Output
+
+Write a new file, `.adh-tracker/EVALUATION-REPORT.md`, with:
+- A pass/fail table for every file-existence check (Step 1), every re-run test (Step
+  2), every spec-compliance item (Step 3), and every flagged item (Step 4).
+- A section titled **"Discrepancies between claimed and actual"** — anything where
+  `IMPLEMENTATION-REPORT.md` or `STAKEHOLDER-SUMMARY.md` says one thing but the real
+  code/output says another.
+- A section titled **"Still genuinely unresolved"** — anything from the original
+  flagged-items list that's still open, stated plainly, not softened.
+- A final one-line verdict: ready to show stakeholders as-is, ready with caveats
+  (name them), or not ready (name what's blocking).
+
+## If anything is unclear
+
+Stop and ask me rather than assuming the original build is correct, or assuming a
+discrepancy is minor. Tell me specifically what you're unsure how to evaluate.
