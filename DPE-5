@@ -1,0 +1,371 @@
+# Copilot prompt — Build the ADH Context Manager (Agent + Skill)
+
+Paste everything below this line into GitHub Copilot Chat (agent mode), in this workspace.
+
+---
+
+## Before you write any code: read and validate
+
+Read these two files first, in full, before doing anything else:
+
+1. `C:\Users\v579356\Downloads\IDP-Context Manager - Design-240626-054443.pdf`
+   — the Confluence "Context Manager - Design" page (space IDP), exported
+   2026-06-24. Read it as text AND look at any embedded diagrams/screenshots visually.
+2. `C:\Users\v579356\Downloads\download.png`
+   — an architecture diagram. Read it visually. It shows the 10-phase pipeline
+   (Developer → Master Orchestrator → Specialist Agents → Shared Context and Systems),
+   a "Context Keeper Agent" box, a "State and Tracking" box (`TRACKER.json`,
+   `session-context.json`, `MANIFEST.md`, each owned by a different agent), a
+   "Custodian Config" box, and an "External Systems" box (Databricks Workspace,
+   Azure DevOps, SharePoint/Confluence).
+
+After reading both, compare them against the spec below. **If anything in either file
+contradicts, extends, or is more recent than the spec below, stop and tell me what you
+found before writing any code.** Do not silently follow the newer doc and do not
+silently follow this prompt if they disagree — surface the conflict to me.
+
+## What you're building — two separate components, not one
+
+This is a deliberate point: there are **two distinct pieces**, built and packaged
+differently. Do not merge them into one file or one mechanism.
+
+| Component | What it is | Where it lives | Mechanism |
+|---|---|---|---|
+| `context.py` reducer CLI | A Python script that reads/writes the state file | `.github/skills/tracker-checkpoint/` | A real GitHub Copilot **Agent Skill** — `SKILL.md` + `context.py` together, auto-discoverable |
+| ADH Context Keeper | The broker that answers questions using the CLI | `.github/agents/` | A GitHub Copilot **custom Agent** — `context-keeper.agent.md`, user-selectable persona |
+
+This is a deliberate design decision made by me (Mohit), not yet reviewed by the
+ticket's author (Raja). Build it as specified below, but call out in your final report
+(see "Output" section) anywhere this deviates from the Confluence doc — specifically:
+the agent having write access at all (the Confluence doc's §5.6 says the broker should
+be read-only), the two new files (`session-index.json`, `session-history.log`) that
+aren't in the Confluence doc's original file layout, and the `.github/` prefix on both
+paths (the Confluence doc's §7 omits it — `adh-accelerator/agents/` and
+`adh-accelerator/.github/skills/...` — but GitHub's current discovery mechanism
+requires `.github/agents/` and `.github/skills/<name>/` at the relevant root for
+auto-discovery to work at all).
+
+## Known architectural risk — flagged, not resolved, investigate before relying on it
+
+The Confluence doc's §5.1 specifies the Context Keeper as **"User-invocable: false"** —
+meaning it should be triggered automatically by other agents, not picked by a human
+from a menu. But custom Agents in GitHub Copilot (the mechanism we're using for it,
+per the decision above) are, as far as I've confirmed, **user-selected personas** —
+something a person manually switches into via the agent picker. I have not found a
+documented mechanism for one agent to silently call another and get a value back while
+staying in control of the conversation.
+
+The one related mechanism I'm aware of is a `handoffs:` frontmatter field that lets one
+agent switch context to another — but that hands control over, it doesn't return an
+answer to the caller. Before assuming this works for an automated pipeline, check
+whether `handoffs` (or anything else available in this Copilot environment) actually
+supports a call-and-return pattern. If it doesn't, tell me explicitly that this is a
+real limitation rather than building around it silently — this affects whether the
+whole "Master Orchestrator calls the Context Keeper automatically" premise is even
+achievable with this mechanism today, versus something that still requires a human to
+manually switch agents at each lookup point.
+
+## Step 1 — Folder structure
+
+Create this structure at the root of the current workspace (if a workspace is already
+open and has its own existing convention for where agent-pipeline files live, e.g. an
+existing `adh-accelerator/` folder, use that as the root instead and tell me which you
+used):
+
+```
+.adh-tracker/
+  session-context.json              (state file, schema in Step 3)
+  session-index.json                (new — dynamic file/content map)
+  session-history.log               (new — append-only decision log)
+  .gitignore                         (exclude *.lock)
+  dummy-phase-outputs/
+    requirements.md                 (dummy, see Step 2)
+    hld.md                          (dummy, see Step 2)
+    lld.md                          (dummy, see Step 2)
+
+.github/skills/tracker-checkpoint/
+  SKILL.md                          (see Step 3)
+  context.py                        (see Step 3)
+  tests/
+    test_context.py                 (see Step 5)
+
+.github/agents/
+  context-keeper.agent.md           (see Step 4)
+```
+
+## Step 2 — Dummy phase-output files
+
+Create three small, realistic-looking markdown files simulating what specialist
+agents would actually produce, so the Context Manager has real content to read and
+index (not empty placeholders):
+
+- `requirements.md` — a short fake requirements doc for a hypothetical data pipeline
+  (source system, source table, load type, watermark column — invent plausible
+  values).
+- `hld.md` — a short fake high-level design doc (medallion architecture scope, bronze
+  catalog/schema names).
+- `lld.md` — a short fake low-level design doc, importantly including a clearly
+  labeled **silver merge key** and **silver schema** value somewhere in the text — this
+  is the canonical example used throughout the design doc and you'll need it for
+  testing in Step 5.
+
+## Step 3 — The `tracker-checkpoint` Skill (`context.py` + `SKILL.md`)
+
+**Constraints**: Python standard library only — no third-party packages. Do not
+create a virtual environment or a `requirements.txt` for this; `json`, `argparse`,
+and `pathlib` are sufficient.
+
+### `SKILL.md` frontmatter
+
+Before writing this, check VS Code's own Skill documentation/help in this environment
+for the exact supported frontmatter fields (I have only confirmed `name`,
+`description`, `user-invocable`, and `disable-model-invocation` as real field names
+from general documentation — I have not seen a complete field list, so verify rather
+than assume any field I haven't listed here works). Set the description so this skill
+is auto-discovered when a question is about pipeline state, schema keys, or file
+locations. Since this skill is meant to be called by other agents and by specialist
+agents programmatically rather than typed by a human as a slash command, consider
+whether `user-invocable: false` is appropriate — but verify what that flag actually
+does in this version of VS Code before relying on it, rather than assuming it matches
+older documentation.
+
+### `context.py` — commands (sourced verbatim from Jira/Confluence, do not improvise)
+
+**Reads**
+- `context.py get <namespace> <key>` — returns `agents.<namespace>.<key>`. Exit 1 with
+  `NOT_FOUND: <namespace>.<key>` if absent or null.
+- `context.py get-shared <key>` — returns `shared.<key>`. Exit 1 with
+  `NOT_FOUND: shared.<key>` if absent.
+- `context.py verify` — prints `N set, M null. Status: PASS / WARN / FAIL`, lists null
+  keys grouped by namespace.
+
+**Writes**
+- `context.py set <namespace> <key> <value>` — writes `agents.<namespace>.<key>`,
+  updates `meta.last_updated`.
+- `context.py set-shared <key> <value>` — writes `shared.<key>`. Merges, never clears
+  sibling keys. Updates `meta.last_updated`.
+
+**Lifecycle**
+- `context.py init --run-id <id> --custodian <c> --dataset <d> --env <e>` — creates
+  `session-context.json` from the schema template below. **Fails if the file already
+  exists** — not idempotent. Creates `.adh-tracker/` if absent.
+- `context.py reset-phase <namespace>` — sets every key in that namespace's dict to
+  null. This command is not given a full spec row in the source doc, only mentioned
+  once in passing (§4.2's null-handling rule). Implement it this way, but mark it in
+  your final report as an **inferred** behavior, not verbatim spec.
+
+**Validation rules**
+- Required: `meta.custodian`, `meta.dataset`, `meta.env` must be set before any agent
+  writes.
+- Type checking: values must be strings, arrays, or objects — no mixing types within
+  one field. Specifically test the `required_phases` field (a `shared` key that
+  defaults to an array `[]`) against a string-encoded-array input like
+  `"[phase1,phase2]"` — decide whether `context.py` should reject this outright or
+  parse it as JSON, and document which you chose and why, since neither the Confluence
+  doc nor I have settled this — it's a real gap, not a missed detail.
+
+**Exit codes**: 0 = success, 1 = error. All errors printed to stderr.
+
+**Specialist agent interface convention** (per the design doc's §8 — implement this
+exact pattern, it's how other agents are expected to call the CLI):
+```
+context.py set <ns> <key> <value>; echo $?
+```
+`0` printed after = success, `1` = error. Reads work the same way:
+`context.py get <ns> <key>` prints the value to stdout on success.
+
+### Full state file schema — `session-context.json`
+
+```json
+{
+  "version": "2.0",
+  "run_id": "<custodian>-<dataset>-<yyyymmdd>-<seq>",
+  "meta": {
+    "custodian": "",
+    "dataset": "",
+    "env": "dev",
+    "started_at": "",
+    "last_updated": ""
+  },
+  "shared": {
+    "required_phases": [],
+    "primary_keys": "",
+    "kv_scope": "",
+    "custodian_catalog_prefix": ""
+  },
+  "agents": {
+    "requirements": {
+      "output_file": null, "source_system": null, "source_schema": null,
+      "source_table": null, "source_format": null, "load_type": null,
+      "watermark_column": null, "target_layers": [], "data_classification": null
+    },
+    "hld": {
+      "output_file": null, "medallion_scope": [], "data_flow": null,
+      "bronze_catalog": null, "bronze_schema": null, "std_schema": null
+    },
+    "lld": {
+      "output_file": null, "silver_catalog": null, "silver_schema": null,
+      "silver_merge_key": null, "gold_schema": null, "dimension_tables": [],
+      "fact_tables": [], "key_decision_set": null
+    },
+    "code_bronze": {
+      "output_file": null, "ingestion_config_path": null, "job_yaml_path": null
+    },
+    "code_silver": { "output_file": null, "notebook_path": null },
+    "code_gold":   { "output_file": null, "notebook_path": null },
+    "sql_views":   { "output_files": [] },
+    "test":        { "test_cases_file": null, "test_scripts": [] },
+    "review":      { "output_file": null, "pr_url": null, "checklist": [] },
+    "deploy":      { "output_file": null, "deploy_timestamp": null, "version_tag": null }
+  }
+}
+```
+
+### New file — `session-index.json`
+
+A dynamic map: file path → one-line description of its content. Maintained by the
+Context Keeper agent (Step 4), not by `context.py` itself — `context.py` only needs to
+be able to read it if asked, it does not write it.
+
+### New file — `session-history.log`
+
+Append-only. One line per write event: timestamp, namespace, key, new value. Also
+maintained by the Context Keeper agent, not by `context.py`.
+
+## Step 4 — `.github/agents/context-keeper.agent.md`
+
+**First, check what file-write tool is actually available to you in this environment**
+(check your own Tools picker / available tool list). I do not have a confirmed tool ID
+for file writing in this Copilot environment — find the real one and use it in the
+`tools:` frontmatter field rather than guessing.
+
+**Also check the `model:` field syntax live.** I have seen this written both as a
+lowercase API-style ID (e.g. `claude-haiku-4.5`) and as a display-name string (e.g.
+`'Claude Opus 4.5'`) in different examples — I have not confirmed which this specific
+environment expects. Use whatever the model picker / dropdown in this Copilot
+environment actually shows, not either format I just listed, if they don't match.
+
+### Scope boundary (confirmed, per the 24-06-2026 call with Raja)
+
+Only reads/writes inside the current session's `.adh-tracker/` workspace. Never
+touches anything outside it.
+
+### Lookup order — cheapest first, stop at first hit. Five tiers, in this exact order:
+
+1. **Tier 1 — state lookup.** `context.py get <namespace> <key>` or
+   `context.py get-shared <key>` against `session-context.json`. ~50 tokens.
+2. **Tier 2 — fixed file-mapping table.** If the question matches one of the five
+   categories below, identify the indicated file as the candidate to read in Tier 4
+   (do not read it yet at this step — Tier 2 only identifies which file):
+
+   | Question type | File | Search for |
+   |---|---|---|
+   | `source_*` questions | `agents.requirements.output_file` | "Source" |
+   | design/flow questions | `agents.hld.output_file` | "Design", "Flow", "Architecture" |
+   | schema/key questions | `agents.lld.output_file` | "Schema", "Key", "Decision" |
+   | config/job questions | `agents.code_bronze.output_file` | "Config", "Job", "Ingestion" |
+   | notebook questions | `agents.code_silver`/`code_gold.output_file` | "Notebook", "Logic", "Transformation" |
+
+3. **Tier 3 — dynamic index lookup.** Only used if Tier 2 has no matching category for
+   this question, OR the file Tier 2 pointed to didn't actually contain the answer.
+   Check `session-index.json` to find a more specific candidate file based on its
+   content description.
+4. **Tier 4 — targeted file read.** Read whichever file was identified by Tier 2 or
+   Tier 3. ~500–1500 tokens.
+5. **Tier 5 — history lookup.** Only for questions about something decided earlier in
+   the run, not current state — bypasses Tiers 1–4 entirely and checks
+   `session-history.log` instead.
+
+If nothing is found at any tier: respond `NOT_FOUND`. Never guess.
+
+### Write responsibilities (this agent writes, unlike the read-only broker in the
+Confluence doc — flagged as a deviation in the Output report)
+
+- Maintain `session-index.json`: whenever you become aware of a new or changed file
+  in the workspace, write an entry mapping that file path to a one-line description
+  of its content.
+- Maintain `session-history.log`: whenever a specialist agent calls `context.py set`
+  or `set-shared`, append one line recording what changed, in which namespace, and
+  when.
+- Never write to `session-context.json` itself — that stays owned by specialist
+  agents, per the design doc's §6.
+
+### Response formats
+
+**Found:**
+```
+VALUE: <answer>
+SOURCE: <file>, tier: <1|2|3|4|5>
+```
+
+**Not found:**
+```
+NOT_FOUND: <key> is not available in state, fixed mapping, index, files, or history.
+```
+
+### Hard rules
+
+- Never invoke specialist agents.
+- Never guess — always cite a `SOURCE`.
+- Never read or write anything outside the current session's `.adh-tracker/` workspace.
+- Writing is limited to exactly two files: `session-index.json` and
+  `session-history.log`. Never write to `session-context.json`.
+
+## Step 5 — Testing (rigorous — write and actually run these, don't just describe them)
+
+Write real tests in `.github/skills/tracker-checkpoint/tests/test_context.py`, run
+them, and capture the real pass/fail output for the report.
+
+1. **Tier 1 round-trip**: `set` a value, then `get` it back — confirm exact match.
+2. **Tier 2 fixed-table hit**: ask a schema/key question and confirm it goes straight
+   to `lld.md` without consulting the index.
+3. **Tier 3 fallback**: ask a question that doesn't match any of the five fixed
+   categories and confirm it falls through to the index instead of failing.
+4. **Tier 4 read accuracy**: confirm the silver merge key returned matches what's
+   actually written in the dummy `lld.md`.
+5. **Tier 5 history lookup**: ask a "what was decided earlier" style question and
+   confirm it's answered from `session-history.log`, not current state.
+6. **Index maintenance**: confirm `session-index.json` gets a new entry after a dummy
+   phase file is added or changed.
+7. **History logging**: call `context.py set` and confirm a corresponding line appears
+   in `session-history.log` with a timestamp.
+8. **Scope boundary**: attempt to make the agent read or write a file outside
+   `.adh-tracker/` and confirm it refuses.
+9. **`init` not idempotent**: run `init` twice and confirm the second call fails as
+   specified.
+10. **Type validation — general**: attempt to write a value that mixes types within
+    one field and confirm it's rejected.
+11. **Type validation — `required_phases` specifically**: attempt
+    `context.py set-shared required_phases "[phase1,phase2]"` and confirm the behavior
+    matches whatever you documented as the chosen interpretation in Step 3.
+12. **`reset-phase`**: confirm it nulls every key in the named namespace and nothing
+    else.
+13. **NOT_FOUND path**: ask about a key that genuinely doesn't exist anywhere and
+    confirm `NOT_FOUND` is returned rather than a fabricated answer.
+
+## Constraints that apply to everything above
+
+- **No git operations.** Create and edit files locally only. Do not create a branch,
+  do not commit, do not push, unless I tell you to separately.
+- **Python standard library only** for `context.py` and its tests.
+
+## Output
+
+When everything above is built and tested, write one Markdown file documenting all of
+it: what was built, where each file actually lives (confirm the real paths you used,
+in case you had to deviate from Step 1's tree), the full test results for all 13 tests
+above with actual captured output (not summarized), and a clearly separated section
+titled **"Deviations from the Confluence design doc requiring Raja's review"** listing
+every place this differs from what's documented — at minimum: read/write capability on
+the broker, the two new files, the `.github/` path prefixes, the `reset-phase`
+inferred behavior, the `required_phases` type-handling decision you made, the actual
+tool ID used for writing, and the actual `model:` field format used.
+
+Save this file as `.adh-tracker/IMPLEMENTATION-REPORT.md`.
+
+## If anything is unclear or conflicts
+
+Stop and ask me. Do not assume a resolution to: a conflict between this prompt and the
+two source files, an ambiguous file location, a missing tool, an unverified frontmatter
+field, or any test that can't be completed as specified. Tell me what's blocking you
+specifically, rather than picking an interpretation and continuing.
